@@ -47,17 +47,17 @@ instance Arbitrary EvenInt where
   arbitrary = EvenInt . (* 2) <$> arbitrary
   shrink (EvenInt n) = EvenInt <$> filter even (shrink n)
 
-genGreaterThan :: Int -> Gen Int
-genGreaterThan x = (\d -> x + 1 + abs d) <$> arbitrary
+genSmallerThan :: Int -> Gen Int
+genSmallerThan x = (\d -> x - 1 - abs d) <$> arbitrary
 
-newtype Increasing = Increasing (Int, Int)
+newtype Decreasing = Decreasing (Int, Int)
   deriving (Show)
 
-instance Arbitrary Increasing where
+instance Arbitrary Decreasing where
   arbitrary = do
       x <- arbitrary
-      y <- genGreaterThan x
-      return $ Increasing (x, y)
+      y <- genSmallerThan x
+      return $ Decreasing (x, y)
 
-  shrink (Increasing (x, y)) =
-      Increasing <$> filter (uncurry (<)) (shrink (x, y))
+  shrink (Decreasing (x, y)) =
+      Decreasing <$> filter (uncurry (>)) (shrink (x, y))

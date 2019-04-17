@@ -43,7 +43,12 @@ data ManualGen a = MG {
 
 type Seed = Int
 
-mCheck :: Show a => Maybe Seed -> ManualGen a -> (a -> Bool) -> IO ()
+-- | Check that property holds for all generated values
+mCheck :: Show a
+       => Maybe Seed   -- ^ Seed (use random seed if none)
+       -> ManualGen a  -- ^ Generator
+       -> (a -> Bool)  -- ^ Property
+       -> IO ()
 mCheck mSeed gen p = do
     seed <- case mSeed of
               Just seed -> return seed
@@ -53,13 +58,13 @@ mCheck mSeed gen p = do
 
 mCheckWith :: Show a => Seed -> ManualGen a -> (a -> Bool) -> IO ()
 mCheckWith seed gen p = do
-    case mMinimalCounterExample seed gen p of
+    case mCounterExample seed gen p of
       Nothing -> putStrLn $ "OK"
       Just a  -> putStrLn $ "Counterexample: " ++ show a
 
-mMinimalCounterExample :: forall a.
-                          Seed -> ManualGen a -> (a -> Bool) -> Maybe a
-mMinimalCounterExample seed MG{..} p = go (R.mkStdGen seed) numTests
+-- | Find minimal counter-example (if one exists)
+mCounterExample :: forall a. Seed -> ManualGen a -> (a -> Bool) -> Maybe a
+mCounterExample seed MG{..} p = go (R.mkStdGen seed) numTests
   where
     numTests = 100
 
@@ -75,12 +80,9 @@ mMinimalCounterExample seed MG{..} p = go (R.mkStdGen seed) numTests
 -- | Apply manually defined shrinker to known-to-be-failing input
 applyManualShrinker :: (a -> [a]) -> (a -> Bool) -> a -> a
 applyManualShrinker f p a =
-     case failed of
+     case filter (not . p) (f a) of
        []   -> a
        a':_ -> applyManualShrinker f p a'
-  where
-    shrunk = f a
-    failed = filter (not . p) shrunk
 
 {-------------------------------------------------------------------------------
   Examples of generators with manually defined shrinkers
@@ -109,17 +111,20 @@ mGenPair genA genB = MG {
 -------------------------------------------------------------------------------}
 
 mExample1 :: IO ()
-mExample1 = mCheck Nothing (mGenPair mExampleInt mExampleInt) (uncurry (<))
+mExample1 = mCheck Nothing mExampleIntPair (uncurry (<))
 
 mExample2 :: IO ()
-mExample2 = mCheck Nothing (mGenPair mExampleInt mExampleInt) (uncurry (>))
+mExample2 = mCheck Nothing mExampleIntPair (uncurry (>))
 
 -- Motivates the "parallel" shrinking case in mGenPair
 mExample3 :: IO ()
-mExample3  = mCheck Nothing (mGenPair mExampleInt mExampleInt) (uncurry (/=))
+mExample3  = mCheck Nothing mExampleIntPair (uncurry (/=))
 
 mExampleInt :: ManualGen Int
 mExampleInt = mGenR (0, 10)
+
+mExampleIntPair :: ManualGen (Int, Int)
+mExampleIntPair = mGenPair mExampleInt mExampleInt
 
 {-------------------------------------------------------------------------------
   Integrated shrinking
@@ -186,12 +191,12 @@ iCheck mSeed gen p = do
 
 iCheckWith :: Show a => Seed -> IntGen a -> (a -> Bool) -> IO ()
 iCheckWith seed gen p =
-    case iMinimalCounterExample seed gen p of
+    case iCounterExample seed gen p of
       Nothing -> putStrLn $ "OK"
       Just a  -> putStrLn $ "Counterexample: " ++ show a
 
-iMinimalCounterExample :: forall a. Seed -> IntGen a -> (a -> Bool) -> Maybe a
-iMinimalCounterExample seed IG{..} p = go (R.mkStdGen seed) numTests
+iCounterExample :: forall a. Seed -> IntGen a -> (a -> Bool) -> Maybe a
+iCounterExample seed IG{..} p = go (R.mkStdGen seed) numTests
   where
     numTests = 100
 
@@ -226,13 +231,67 @@ exampleIntGenPair :: Seed -> IO ()
 exampleIntGenPair seed = showTree seed $ twice iExampleInt
 
 iExample1 :: IO ()
-iExample1 = iCheck Nothing (twice iExampleInt) (uncurry (<))
+iExample1 = iCheck Nothing iExampleIntPair (uncurry (<))
 
 iExample2 :: IO ()
-iExample2 = iCheck Nothing (twice iExampleInt) (uncurry (>))
+iExample2 = iCheck Nothing iExampleIntPair (uncurry (>))
 
 iExample3 :: IO ()
-iExample3  = iCheck Nothing (twice iExampleInt) (uncurry (/=))
+iExample3  = iCheck Nothing iExampleIntPair (uncurry (/=))
 
 iExampleInt :: IntGen Int
 iExampleInt = intGen mExampleInt
+
+iExampleIntPair :: IntGen (Int, Int)
+iExampleIntPair = (,) <$> iExampleInt <*> iExampleInt
+
+newtype Decreasing = Decreasing (Int, Int)
+  deriving (Show)
+
+iDecreasing :: IntGen Decreasing
+iDecreasing = do
+    x <- iExampleInt
+    d <- iExampleInt
+    return $ Decreasing (x, x - 1 - d)
+
+{-------------------------------------------------------------------------------
+  Overriding shrinking
+-------------------------------------------------------------------------------}
+
+overrideShrinker :: forall a. (a -> [a]) -> IntGen a -> IntGen a
+overrideShrinker f IG{..} = IG $ override . genTree
+  where
+    override :: Tree a -> Tree a
+    override (Node a _) = unfoldTree (\x -> (x, f x)) a
+
+iExampleIntPair' :: IntGen (Int, Int)
+iExampleIntPair' = overrideShrinker shrinkPair iExampleIntPair
+  where
+    shrinkPair :: (Int, Int) -> [(Int, Int)]
+    shrinkPair (a, b) = concat [ [ (a', b ) | a' <- pred' a ]
+                               , [ (a , b') | b' <- pred' b ]
+                               , [ (a', b') | a' <- pred' a
+                                            , b' <- pred' b ]
+                               ]
+
+    pred' :: Int -> [Int]
+    pred' n = [0 .. pred n]
+
+{-------------------------------------------------------------------------------
+  Parallel shrinking
+-------------------------------------------------------------------------------}
+
+(<**>) :: IntGen (a -> b) -> IntGen a -> IntGen b
+(<**>) genF genA = IG $ \prng ->
+    let (prngF, prngA) = R.split prng
+    in (uncurry ($)) <$> cartTree (genTree genF prngF)
+                                  (genTree genA prngA)
+
+infixl 4 <**>
+
+cartTree :: Tree a -> Tree b -> Tree (a, b)
+cartTree (Node a ts) (Node b ts') =
+    Node (a, b) (zipWith cartTree ts ts')
+
+iExampleIntPair'' :: IntGen (Int, Int)
+iExampleIntPair'' = (,) <$> iExampleInt <**> iExampleInt

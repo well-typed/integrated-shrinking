@@ -68,6 +68,18 @@ genIntPair'' = Gen.shrink shrink genIntPair
     pred' 0 = []
     pred' n = [n - 1]
 
+-- Piggy back on the genrator for lists
+genIntPairList :: Monad m => GenT m (Int, Int)
+genIntPairList = aux <$> Gen.list (Range.singleton 2) (genR (0, 10))
+  where
+    aux :: [Int] -> (Int, Int)
+    aux [x, y] = (x, y)
+    aux _      = error "genIntPairList: impossible"
+
+-- Using our parallel shrinker
+genIntPairParallel :: Monad m => GenT m (Int, Int)
+genIntPairParallel = (,) <$> genR (0, 10) <**> genR (0, 10)
+
 -- often not minimal
 --
 -- For example, might give counter example
@@ -107,7 +119,7 @@ showSmallCounterexample example = do
     (testSeed, genSeed) <- findTestStartingWith isSmall genIntPair example
     void $ runTest (Just testSeed) genIntPair example
     putStrLn "Shrink tree:"
-    showTree $ genTree genSeed genIntPair
+    showTree $ genTree sizeUnused genSeed genIntPair
   where
     isSmall :: (Int, Int) -> Bool
     isSmall (x, y) = (x == 3 && y <= 3) || (y == 3 && x <= 3)
@@ -145,7 +157,7 @@ findTestSuchThat propTree gen prop = go
           H.OK       -> go
           H.GaveUp   -> error "findTestSuchThat: gave up"
           H.Failed _ -> do
-            if propTree (genTree genSeed gen)
+            if propTree (genTree sizeUnused genSeed gen)
               then return (testSeed, genSeed)
               else go
 
@@ -216,16 +228,21 @@ findTreeSuchThat :: Gen a -> (Tree (Maybe a) -> Bool) -> Maybe Seed
 findTreeSuchThat gen p = listToMaybe $ filter p' (map (Seed 0) [0..])
   where
     p' :: Seed -> Bool
-    p' seed = p (genTree seed gen)
+    p' seed = p (genTree sizeUnused seed gen)
 
-genTree :: Seed -> Gen a -> Tree (Maybe a)
-genTree seed = effectfreeTree
-             . H.runDiscardEffect
-             . H.runGenT sizeUnused seed
+genTree :: Size -> Seed -> Gen a -> Tree (Maybe a)
+genTree size seed =
+      fromPureTree
+    . H.runDiscardEffect
+    . H.runGenT size seed
 
-effectfreeTree :: H.Tree Identity a -> Tree a
-effectfreeTree (H.Tree (Identity (H.Node a ts))) =
-    Node a (map effectfreeTree ts)
+fromPureTree :: H.Tree Identity a -> Tree a
+fromPureTree (H.Tree (Identity (H.Node a ts))) =
+    Node a (map fromPureTree ts)
+
+toPureTree :: Monad m => Tree a -> H.Tree m a
+toPureTree (Node a ts) =
+    H.Tree (return $ H.Node a (map toPureTree ts))
 
 showTree :: forall a. Show a => Tree (Maybe a) -> IO ()
 showTree = putStrLn . drawTree . fmap render
@@ -233,3 +250,24 @@ showTree = putStrLn . drawTree . fmap render
     render :: Maybe a -> String
     render Nothing  = "<discard>"
     render (Just x) = show x
+
+{-------------------------------------------------------------------------------
+  Hedgehog auxiliary: parallel shrinking
+-------------------------------------------------------------------------------}
+
+(<**>) :: Monad m => GenT m (a -> b) -> GenT m a -> GenT m b
+(<**>) genF genA = H.GenT $ \size seed ->
+    let (seedF, seedA) = H.Seed.split seed
+    in uncurry ($) <$> cartHTree (H.runGenT size seedF genF)
+                                 (H.runGenT size seedA genA)
+
+infixl 4 <**>
+
+cartHTree :: forall f a b. Applicative f
+          => H.Tree f a -> H.Tree f b -> H.Tree f (a, b)
+cartHTree (H.Tree as) (H.Tree bs) = H.Tree $
+    aux <$> as <*> bs
+  where
+    aux :: H.Node f a -> H.Node f b -> H.Node f (a, b)
+    aux (H.Node a as') (H.Node b bs') =
+        H.Node (a, b) (zipWith cartHTree as' bs')
