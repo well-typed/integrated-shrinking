@@ -8,10 +8,10 @@ build-type:          Simple
 extra-source-files:  CHANGELOG.md
 
 library
-  exposed-modules:     ValueDiffs
+  exposed-modules:     FromScratch
                        UsingHedgehog
                        UsingQuickCheck
-                       FromScratch
+                       ValueDiffs
   other-modules:       Util
   hs-source-dirs:      src
   build-depends:       base       >= 4.12 && < 4.13

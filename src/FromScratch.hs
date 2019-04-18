@@ -9,6 +9,7 @@ import Data.Tree
 import qualified System.Random as R
 
 import Util
+import Debug.Trace
 
 {-------------------------------------------------------------------------------
   Manual shrinking
@@ -195,7 +196,7 @@ iCheckWith seed gen p =
       Nothing -> putStrLn $ "OK"
       Just a  -> putStrLn $ "Counterexample: " ++ show a
 
-iCounterExample :: forall a. Seed -> IntGen a -> (a -> Bool) -> Maybe a
+iCounterExample :: forall a. Show a => Seed -> IntGen a -> (a -> Bool) -> Maybe a
 iCounterExample seed IG{..} p = go (R.mkStdGen seed) numTests
   where
     numTests = 100
@@ -203,7 +204,7 @@ iCounterExample seed IG{..} p = go (R.mkStdGen seed) numTests
     go :: R.StdGen -> Int -> Maybe a
     go _    0 = Nothing
     go prng n = if not (p (rootLabel tree))
-                  then Just $ applyIntegratedShrinker p tree
+                  then trace ("tree: " ++ drawTree (fmap show tree)) $ Just $ applyIntegratedShrinker p tree
                   else go prng2 (n - 1)
       where
         (prng1, prng2) = R.split prng
@@ -284,14 +285,18 @@ iExampleIntPair' = overrideShrinker shrinkPair iExampleIntPair
 (<**>) :: IntGen (a -> b) -> IntGen a -> IntGen b
 (<**>) genF genA = IG $ \prng ->
     let (prngF, prngA) = R.split prng
-    in (uncurry ($)) <$> cartTree (genTree genF prngF)
-                                  (genTree genA prngA)
+    in (uncurry ($)) <$> shrinkTreePair (genTree genF prngF)
+                                        (genTree genA prngA)
 
 infixl 4 <**>
 
-cartTree :: Tree a -> Tree b -> Tree (a, b)
-cartTree (Node a ts) (Node b ts') =
-    Node (a, b) (zipWith cartTree ts ts')
+shrinkTreePair :: Tree a -> Tree b -> Tree (a, b)
+shrinkTreePair l@(Node a ls) r@(Node b rs) =
+    Node (a, b) $ concat [
+        [shrinkTreePair l' r  | l' <- ls]
+      , [shrinkTreePair l  r' | r' <- rs]
+      , [shrinkTreePair l' r' | l' <- ls, r' <- rs]
+      ]
 
 iExampleIntPair'' :: IntGen (Int, Int)
 iExampleIntPair'' = (,) <$> iExampleInt <**> iExampleInt

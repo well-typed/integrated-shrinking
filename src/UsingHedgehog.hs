@@ -258,16 +258,20 @@ showTree = putStrLn . drawTree . fmap render
 (<**>) :: Monad m => GenT m (a -> b) -> GenT m a -> GenT m b
 (<**>) genF genA = H.GenT $ \size seed ->
     let (seedF, seedA) = H.Seed.split seed
-    in uncurry ($) <$> cartHTree (H.runGenT size seedF genF)
-                                 (H.runGenT size seedA genA)
+    in uncurry ($) <$> shrinkTreePair (H.runGenT size seedF genF)
+                                      (H.runGenT size seedA genA)
 
 infixl 4 <**>
 
-cartHTree :: forall f a b. Applicative f
+shrinkTreePair :: forall f a b. Applicative f
           => H.Tree f a -> H.Tree f b -> H.Tree f (a, b)
-cartHTree (H.Tree as) (H.Tree bs) = H.Tree $
-    aux <$> as <*> bs
+shrinkTreePair l@(H.Tree left) r@(H.Tree right) = H.Tree $
+    aux <$> left <*> right
   where
     aux :: H.Node f a -> H.Node f b -> H.Node f (a, b)
-    aux (H.Node a as') (H.Node b bs') =
-        H.Node (a, b) (zipWith cartHTree as' bs')
+    aux (H.Node a ls) (H.Node b rs) =
+        H.Node (a, b) $ concat [
+            [shrinkTreePair l' r  | l' <- ls]
+          , [shrinkTreePair l  r' | r' <- rs]
+          , [shrinkTreePair l' r' | l' <- ls, r' <- rs]
+          ]
