@@ -8,6 +8,7 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Data.Functor.Identity
 import Data.IORef
+import Data.List (sort)
 import Data.Maybe (listToMaybe)
 import Data.Tree
 
@@ -19,8 +20,8 @@ import qualified Hedgehog.Internal.Region   as H
 import qualified Hedgehog.Internal.Report   as H
 import qualified Hedgehog.Internal.Runner   as H
 import qualified Hedgehog.Internal.Seed     as H.Seed
-import qualified Hedgehog.Internal.Tree     as H.Tree
 import qualified Hedgehog.Internal.Tree     as H (Tree(..), Node(..))
+import qualified Hedgehog.Internal.Tree     as H.Tree
 import qualified Hedgehog.Range             as Range
 
 import Util
@@ -275,3 +276,39 @@ shrinkTreePair l@(H.Tree left) r@(H.Tree right) = H.Tree $
           , [shrinkTreePair l  r' | r' <- rs]
           , [shrinkTreePair l' r' | l' <- ls, r' <- rs]
           ]
+
+{-------------------------------------------------------------------------------
+  The list example
+-------------------------------------------------------------------------------}
+
+genList :: Monad m => (forall a. Range Int -> GenT m a -> GenT m [a]) -> GenT m [Int]
+genList gen = gen (Range.constant 0 3) (genR (0, 10))
+
+-- runTest Nothing genList example5
+-- may produce [7, 0]
+example5 :: GenT IO [Int] -> Property
+example5 gen = property $ do
+    xs <- H.forAllT gen
+    assert $ xs == sort xs
+
+example6 :: GenT IO [Int] -> Property
+example6 gen = property $ do
+    xs <- H.forAllT gen
+    assert $ sum xs <= length xs
+
+{-
+        ┏━━ src/UsingHedgehog.hs ━━━
+    355 ┃ example7 :: GenT IO [Int] -> Property
+    356 ┃ example7 gen = property $ do
+    357 ┃     xs <- H.forAllT gen
+        ┃     │ [ 0 , 0 , 0 ]
+    358 ┃     assert $ all (\x -> x >= length xs) xs
+        ┃     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    This failure can be reproduced by running:
+    > recheck (Size 9) (Seed 9403026362374546758 1097971249691767389) <property>
+-}
+example7 :: GenT IO [Int] -> Property
+example7 gen = property $ do
+    xs <- H.forAllT gen
+    assert $ all (\x -> x >= length xs) xs
