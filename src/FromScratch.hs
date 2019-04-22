@@ -48,14 +48,11 @@ type Seed = Int
 
 -- | Check that property holds for all generated values
 mCheck :: Show a
-       => Maybe Seed   -- ^ Seed (use random seed if none)
-       -> ManualGen a  -- ^ Generator
+       => ManualGen a  -- ^ Generator
        -> (a -> Bool)  -- ^ Property
        -> IO ()
-mCheck mSeed gen p = do
-    seed <- case mSeed of
-              Just seed -> return seed
-              Nothing   -> R.randomIO
+mCheck gen p = do
+    seed <- R.randomIO
     putStrLn $ "Using seed " ++ show seed
     mCheckWith seed gen p
 
@@ -121,14 +118,14 @@ mGenPair genA genB = MG {
 -------------------------------------------------------------------------------}
 
 mExample1 :: IO ()
-mExample1 = mCheck Nothing mExampleIntPair (uncurry (<))
+mExample1 = mCheck mExampleIntPair (uncurry (<))
 
 mExample2 :: IO ()
-mExample2 = mCheck Nothing mExampleIntPair (uncurry (>))
+mExample2 = mCheck mExampleIntPair (uncurry (>))
 
 -- Motivates the "parallel" shrinking case in mGenPair
 mExample3 :: IO ()
-mExample3  = mCheck Nothing mExampleIntPair (uncurry (/=))
+mExample3  = mCheck mExampleIntPair (uncurry (/=))
 
 mExampleInt :: ManualGen Int
 mExampleInt = mGenR (0, 10)
@@ -197,11 +194,9 @@ findSeedSuchThat p gen = head $ filter p' ([0 ..])
   Test driver for integrated shrinking
 -------------------------------------------------------------------------------}
 
-iCheck :: Show a => Maybe Seed -> IntGen a -> (a -> Bool) -> IO ()
-iCheck mSeed gen p = do
-    seed <- case mSeed of
-              Just seed -> return seed
-              Nothing   -> R.randomIO
+iCheck :: Show a => IntGen a -> (a -> Bool) -> IO ()
+iCheck gen p = do
+    seed <- R.randomIO
     putStrLn $ "Using seed " ++ show seed
     iCheckWith seed gen p
 
@@ -249,13 +244,13 @@ exampleIntGenPair :: Seed -> IO ()
 exampleIntGenPair seed = showTree seed $ twice iExampleInt
 
 iExample1 :: IO ()
-iExample1 = iCheck Nothing iExampleIntPair (uncurry (<))
+iExample1 = iCheck iExampleIntPair (uncurry (<))
 
 iExample2 :: IO ()
-iExample2 = iCheck Nothing iExampleIntPair (uncurry (>))
+iExample2 = iCheck iExampleIntPair (uncurry (>))
 
 iExample3 :: IO ()
-iExample3  = iCheck Nothing iExampleIntPair (uncurry (/=))
+iExample3  = iCheck iExampleIntPair (uncurry (/=))
 
 iExampleInt :: IntGen Int
 iExampleInt = intGen mExampleInt
@@ -344,7 +339,7 @@ mGenIntList = mGenList mExampleInt
 
 -- Always the (unique) minimal counter example [1,0]
 mExample4 :: IO ()
-mExample4 = mCheck Nothing mGenIntList (\xs -> xs == sort xs)
+mExample4 = mCheck mGenIntList (\xs -> xs == sort xs)
 
 {-------------------------------------------------------------------------------
   Lists: integrated case
@@ -354,11 +349,11 @@ mExample4 = mCheck Nothing mGenIntList (\xs -> xs == sort xs)
 -- Starting from [2,8,10] we shrink the length to [2,8], [2]; then the element
 -- to [1], and finally to [0]. Nice.
 iExample4 :: IO ()
-iExample4 = iCheck Nothing (iGenList1 iExampleInt) null
+iExample4 = iCheck (iGenList1 iExampleInt) null
 
 -- Sorting example is much more demanding of the shrinker
 iExample5 :: (IntGen Int -> IntGen [Int]) -> IO ()
-iExample5 genAs = iCheck Nothing (genAs iExampleInt) (\xs -> xs == sort xs)
+iExample5 genAs = iCheck (genAs iExampleInt) (\xs -> xs == sort xs)
 
 -- Most obvious way to define the instance. Does not work very well.
 --
@@ -392,8 +387,8 @@ iGenList2 genA = do
     iGenN n genA
 
 -- | Insert new subtrees after the existing ones
-finallyShrink :: forall a. (a -> [a]) -> IntGen a -> IntGen a
-finallyShrink shrinkMore IG{..} = IG $ go . genTree
+expand :: forall a. (a -> [a]) -> IntGen a -> IntGen a
+expand shrinkMore IG{..} = IG $ go . genTree
   where
     go :: Tree a -> Tree a
     go (Node a ts) = Node a (map go ts ++ subForest (unfoldTree step a))
@@ -403,7 +398,7 @@ finallyShrink shrinkMore IG{..} = IG $ go . genTree
 
 iGenList3 :: IntGen a -> IntGen [a]
 iGenList3 genA =
-    finallyShrink dropElement $ do
+    expand dropElement $ do
       n <- iGenR (0, 3)
       iGenN n genA
 
@@ -412,7 +407,7 @@ freeze IG{..} = IG $ \prng -> Node (IG $ \_ -> (genTree prng)) []
 
 iGenList4' :: IntGen a -> IntGen [IntGen a]
 iGenList4' genA =
-     finallyShrink dropElement $ do
+     expand dropElement $ do
        n <- iGenR (0, 3)
        replicateM n (freeze genA)
 
@@ -509,4 +504,4 @@ iGenBST genA = IG $ go . genTree (iGenBST' genA)
     go (Node ts [])   = interleaveBST ts
 
 iExampleBST :: IO ()
-iExampleBST = iCheck Nothing (iGenBST iExampleInt) (\t -> sort (inorder t) == inorder t)
+iExampleBST = iCheck (iGenBST iExampleInt) (\t -> sort (inorder t) == inorder t)
