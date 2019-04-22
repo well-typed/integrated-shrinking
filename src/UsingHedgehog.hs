@@ -274,7 +274,6 @@ shrinkTreePair l@(H.Tree left) r@(H.Tree right) = H.Tree $
         H.Node (a, b) $ concat [
             [shrinkTreePair l' r  | l' <- ls]
           , [shrinkTreePair l  r' | r' <- rs]
-          , [shrinkTreePair l' r' | l' <- ls, r' <- rs]
           ]
 
 {-------------------------------------------------------------------------------
