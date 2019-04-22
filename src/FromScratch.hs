@@ -271,14 +271,14 @@ iDecreasing = do
   Overriding shrinking
 -------------------------------------------------------------------------------}
 
-overrideShrinker :: forall a. (a -> [a]) -> IntGen a -> IntGen a
-overrideShrinker f IG{..} = IG $ override . genTree
+replace :: forall a. (a -> [a]) -> IntGen a -> IntGen a
+replace f IG{..} = IG $ override . genTree
   where
     override :: Tree a -> Tree a
     override (Node a _) = unfoldTree (\x -> (x, f x)) a
 
 iExampleIntPair' :: IntGen (Int, Int)
-iExampleIntPair' = overrideShrinker shrinkPair iExampleIntPair
+iExampleIntPair' = replace shrinkPair iExampleIntPair
   where
     shrinkPair :: (Int, Int) -> [(Int, Int)]
     shrinkPair (a, b) = concat [ [ (a', b ) | a' <- pred' a ]
