@@ -108,8 +108,6 @@ mGenPair genA genB = MG {
     , shrink = \(a, b) -> concat [
                    [ (a', b ) | a' <- shrink genA a ]
                  , [ (a , b') | b' <- shrink genB b ]
-                 , [ (a', b') | a' <- shrink genA a
-                              , b' <- shrink genB b ]
                  ]
     }
 
@@ -283,8 +281,6 @@ iExampleIntPair' = replace shrinkPair iExampleIntPair
     shrinkPair :: (Int, Int) -> [(Int, Int)]
     shrinkPair (a, b) = concat [ [ (a', b ) | a' <- pred' a ]
                                , [ (a , b') | b' <- pred' b ]
-                               , [ (a', b') | a' <- pred' a
-                                            , b' <- pred' b ]
                                ]
 
     pred' :: Int -> [Int]
@@ -297,16 +293,16 @@ iExampleIntPair' = replace shrinkPair iExampleIntPair
 (<**>) :: IntGen (a -> b) -> IntGen a -> IntGen b
 (<**>) genF genA = IG $ \prng ->
     let (prngF, prngA) = R.split prng
-    in (uncurry ($)) <$> shrinkTreePair (genTree genF prngF)
+    in (uncurry ($)) <$> interleavePair (genTree genF prngF)
                                         (genTree genA prngA)
 
 infixl 4 <**>
 
-shrinkTreePair :: Tree a -> Tree b -> Tree (a, b)
-shrinkTreePair l@(Node a ls) r@(Node b rs) =
+interleavePair :: Tree a -> Tree b -> Tree (a, b)
+interleavePair l@(Node a ls) r@(Node b rs) =
     Node (a, b) $ concat [
-        [shrinkTreePair l' r  | l' <- ls]
-      , [shrinkTreePair l  r' | r' <- rs]
+        [interleavePair l' r  | l' <- ls]
+      , [interleavePair l  r' | r' <- rs]
       ]
 
 iExampleIntPair'' :: IntGen (Int, Int)
@@ -452,20 +448,20 @@ iGenList5 genA = IG $ go . genTree (iGenList5' genA)
     go (Node ts [])   = interleave ts
 
 {-------------------------------------------------------------------------------
-  Second example of interleaving: BST
+  Second example of interleaving: binary tree
 -------------------------------------------------------------------------------}
 
-data BST a = Leaf a | Branch (BST a) (BST a)
+data BT a = Leaf a | Branch (BT a) (BT a)
   deriving (Show, Functor)
 
-inorder :: BST a -> [a]
+inorder :: BT a -> [a]
 inorder (Leaf a)     = [a]
 inorder (Branch l r) = inorder l ++ inorder r
 
-iGenBST' :: forall a. IntGen a -> IntGen (BST (Tree a))
+iGenBST' :: forall a. IntGen a -> IntGen (BT (Tree a))
 iGenBST' genA = go =<< iGenR_ (0, 10)
   where
-    go :: Int -> IntGen (BST (Tree a))
+    go :: Int -> IntGen (BT (Tree a))
     go 0 = Leaf <$> freezeTree genA
     go 1 = Leaf <$> freezeTree genA
     go n = Branch <$> go l <*> go r
@@ -473,14 +469,14 @@ iGenBST' genA = go =<< iGenR_ (0, 10)
         l = n `div` 2
         r = n - l
 
-reduceOne :: BST (Tree a) -> [BST (Tree a)]
+reduceOne :: BT (Tree a) -> [BT (Tree a)]
 reduceOne (Leaf a)     = map Leaf $ subForest a
 reduceOne (Branch l r) = concat [
                              [Branch l' r  | l' <- reduceOne l]
                            , [Branch l  r' | r' <- reduceOne r]
                            ]
 
-dropOne :: BST (Tree a) -> [BST (Tree a)]
+dropOne :: BT (Tree a) -> [BT (Tree a)]
 dropOne (Leaf _)     = []
 dropOne (Branch l r) = concat [
                            [l]
@@ -489,17 +485,17 @@ dropOne (Branch l r) = concat [
                          , [Branch l  r' | r' <- dropOne r]
                          ]
 
-interleaveBST :: BST (Tree a) -> Tree (BST a)
+interleaveBST :: BT (Tree a) -> Tree (BT a)
 interleaveBST ts =
     Node (fmap rootLabel ts) $ concat [
         map interleaveBST $ reduceOne ts
       , map interleaveBST $ dropOne   ts
       ]
 
-iGenBST :: forall a. IntGen a -> IntGen (BST a)
+iGenBST :: forall a. IntGen a -> IntGen (BT a)
 iGenBST genA = IG $ go . genTree (iGenBST' genA)
   where
-    go :: Tree (BST (Tree a)) -> Tree (BST a)
+    go :: Tree (BT (Tree a)) -> Tree (BT a)
     go (Node _ (_:_)) = error "iGenBST: impossible"
     go (Node ts [])   = interleaveBST ts
 
