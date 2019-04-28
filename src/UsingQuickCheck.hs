@@ -1,6 +1,6 @@
 module UsingQuickCheck where
 
-import Test.QuickCheck
+import           Test.QuickCheck
 
 newtype MyInt = MyInt Int
   deriving (Show, Eq, Ord)
@@ -61,3 +61,14 @@ instance Arbitrary Decreasing where
 
   shrink (Decreasing (x, y)) =
       Decreasing <$> filter (uncurry (>)) (shrink (x, y))
+
+{-------------------------------------------------------------------------------
+  Wrapper around Int that picks uniformly (unaffected by size)
+-------------------------------------------------------------------------------}
+
+newtype Uniform = Uniform Int
+  deriving (Show)
+
+instance Arbitrary Uniform where
+  arbitrary = Uniform <$> choose (0, 100)
+  shrink (Uniform n) = Uniform <$> shrink n

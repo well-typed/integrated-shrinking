@@ -4,15 +4,15 @@
 
 module UsingHedgehog where
 
-import Control.Monad
-import Control.Monad.IO.Class
-import Data.Functor.Identity
-import Data.IORef
-import Data.List (sort)
-import Data.Maybe (listToMaybe)
-import Data.Tree
+import           Control.Monad
+import           Control.Monad.IO.Class
+import           Data.Functor.Identity
+import           Data.IORef
+import           Data.List                  (sort)
+import           Data.Maybe                 (listToMaybe)
+import           Data.Tree
 
-import Hedgehog
+import           Hedgehog
 import qualified Hedgehog.Gen               as Gen
 import qualified Hedgehog.Internal.Gen      as H
 import qualified Hedgehog.Internal.Property as H
@@ -20,11 +20,11 @@ import qualified Hedgehog.Internal.Region   as H
 import qualified Hedgehog.Internal.Report   as H
 import qualified Hedgehog.Internal.Runner   as H
 import qualified Hedgehog.Internal.Seed     as H.Seed
-import qualified Hedgehog.Internal.Tree     as H (Tree(..), Node(..))
+import qualified Hedgehog.Internal.Tree     as H (NodeT (..), TreeT (..))
 import qualified Hedgehog.Internal.Tree     as H.Tree
 import qualified Hedgehog.Range             as Range
 
-import Util
+import           Util
 
 genR :: (Monad m, Integral a) => (a, a) -> GenT m a
 genR (lo, hi) = Gen.shrink (\a -> [lo .. pred a]) $
@@ -207,9 +207,9 @@ type GenTracker = IORef [Seed]
 
 trackGen :: MonadIO m => GenTracker -> GenT m a -> GenT m a
 trackGen ref H.GenT{..} = H.GenT $ \size seed -> do
-    H.Tree $ do
+    H.TreeT $ do
       liftIO $ modifyIORef ref (seed :)
-      H.Tree.runTree (unGen size seed)
+      H.Tree.runTreeT (unGenT size seed)
 
 newGenTracker :: IO GenTracker
 newGenTracker = newIORef []
@@ -234,16 +234,16 @@ findTreeSuchThat gen p = listToMaybe $ filter p' (map (Seed 0) [0..])
 genTree :: Size -> Seed -> Gen a -> Tree (Maybe a)
 genTree size seed =
       fromPureTree
-    . H.runDiscardEffect
+    . H.runDiscardEffectT
     . H.runGenT size seed
 
-fromPureTree :: H.Tree Identity a -> Tree a
-fromPureTree (H.Tree (Identity (H.Node a ts))) =
+fromPureTree :: H.TreeT Identity a -> Tree a
+fromPureTree (H.TreeT (Identity (H.NodeT a ts))) =
     Node a (map fromPureTree ts)
 
-toPureTree :: Monad m => Tree a -> H.Tree m a
+toPureTree :: Monad m => Tree a -> H.TreeT m a
 toPureTree (Node a ts) =
-    H.Tree (return $ H.Node a (map toPureTree ts))
+    H.TreeT (return $ H.NodeT a (map toPureTree ts))
 
 showTree :: forall a. Show a => Tree (Maybe a) -> IO ()
 showTree = putStrLn . drawTree . fmap render
@@ -265,13 +265,13 @@ showTree = putStrLn . drawTree . fmap render
 infixl 4 <**>
 
 shrinkTreePair :: forall f a b. Applicative f
-          => H.Tree f a -> H.Tree f b -> H.Tree f (a, b)
-shrinkTreePair l@(H.Tree left) r@(H.Tree right) = H.Tree $
+               => H.TreeT f a -> H.TreeT f b -> H.TreeT f (a, b)
+shrinkTreePair l@(H.TreeT left) r@(H.TreeT right) = H.TreeT $
     aux <$> left <*> right
   where
-    aux :: H.Node f a -> H.Node f b -> H.Node f (a, b)
-    aux (H.Node a ls) (H.Node b rs) =
-        H.Node (a, b) $ concat [
+    aux :: H.NodeT f a -> H.NodeT f b -> H.NodeT f (a, b)
+    aux (H.NodeT a ls) (H.NodeT b rs) =
+        H.NodeT (a, b) $ concat [
             [shrinkTreePair l' r  | l' <- ls]
           , [shrinkTreePair l  r' | r' <- rs]
           ]
