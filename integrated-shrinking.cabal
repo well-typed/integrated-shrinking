@@ -8,15 +8,18 @@ build-type:          Simple
 extra-source-files:  CHANGELOG.md
 
 library
-  exposed-modules:     FromScratch
+  exposed-modules:     State
+                       FromScratch
                        UsingHedgehog
                        UsingQuickCheck
                        ValueDiffs
   other-modules:       Util
   hs-source-dirs:      src
   build-depends:       base       >= 4.12 && < 4.13
-                     , random
                      , containers
+                     , mtl
+                     , random
+                     , transformers
                        -- we do some low-level hedgehog hacking
                      , hedgehog   == 0.6.1
                      , QuickCheck >= 2.13 && < 2.14
