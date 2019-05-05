@@ -177,6 +177,7 @@ unfoldTree f = go
     go :: a -> Tree a
     go x = Node x $ map go (f x)
 
+-- | Prune any subtrees whose root does not satisfy the predicate
 filterTree_ :: forall a. (a -> Bool) -> Tree a -> Maybe (Tree a)
 filterTree_ p = go
   where
@@ -185,6 +186,7 @@ filterTree_ p = go
       | p x       = Just $ Node x (mapMaybe go xs)
       | otherwise = Nothing
 
+-- | Remove any elements from the tree that do not satisfy the predicate
 filterTree :: forall a. (a -> Bool) -> Tree a -> [Tree a]
 filterTree p = go
   where
@@ -429,6 +431,8 @@ couple [a, b]     = Two a b
 couple _otherwise = error "couple: too many elements"
 
 -- | Generator for 'Count' in the same style as we did for lists
+--
+-- This demonstrates that the pattern scales to other datatypes.
 iGenCouple :: forall a. Integrated a -> Integrated (Couple a)
 iGenCouple genA = dependent interleaveCount $ do
     n <- dontShrink (iRandomR (1, 2))
