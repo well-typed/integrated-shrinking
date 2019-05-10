@@ -58,6 +58,8 @@ data Manual a = Manual {
 -- | Generate random value in specified range
 --
 -- Shrinks using binary search to lower bound.
+--
+-- TODO: use nub.
 mRandomR :: (R.Random a, Integral a) => (a, a) -> Manual a
 mRandomR (lo, hi) = Manual {
       gen    = Gen (fst . R.randomR (lo, hi))
@@ -254,6 +256,10 @@ join (Node (Node x xs) xss) = Node x (xs ++ map join xss)
   subtrees whilst still preserving the same properties.
 
   (This also means 'Tree' has (at least) /four/ 'Applicative' instances.)
+
+  TODO: Explain why join' is better. And use it.
+  (Give examples of the effects of a greedy shrinker with both applicative
+  and monad to illustrate the differnces).
 -------------------------------------------------------------------------------}
 
 join' :: Tree (Tree a) -> Tree a
@@ -369,6 +375,12 @@ iListWRONG' genLen genA = independent $ do
     n <- lift genLen
     lift $ iListOfSize n genA
 
+{-
+iList' genLen genA = ..
+    n <- genLen
+    includes <- replicateM n (generate true of false)
+  -}
+
 -- | Make the shrink tree explicitly available
 --
 -- This is very useful when we need to override shrinking.
@@ -388,6 +400,8 @@ dontShrink (Integrated f) = Dependent $ Integrated $ singleton . root . f
 -- @f@, but it will not shrink the structure of @f@ itself.
 --
 -- See 'iList' for an example.
+--
+-- TODO: Use Gen instead of INtegrated to avoid error case?
 dependent :: HasCallStack => (a -> Tree b) -> Dependent a -> Integrated b
 dependent manualShrinker (Dependent (Integrated f)) = Integrated $ \prng ->
     case f prng of
@@ -530,11 +544,16 @@ iEvenWRONG (lo, hi) = iRandomR (lo, hi) `iSuchThat_` even
 -- | Alternative definition of 'iEven'
 --
 -- This is a nice example where we can really benefit from integrated shrinking.
+--
+-- TODO: Bugfix, lower bound needs to div 2.
+-- (Or workaround, upper bound only, lower bound always zero)
 iEven' :: (Int, Int) -> Integrated Int
 iEven' (lo, hi) = (*2) <$> iRandomR (lo, hi `div` 2)
 
 {-------------------------------------------------------------------------------
   Driver
+
+  TODO: Discuss tests with multiple generators.
 -------------------------------------------------------------------------------}
 
 type Seed = Int
