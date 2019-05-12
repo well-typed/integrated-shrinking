@@ -1,13 +1,15 @@
 {-# LANGUAGE DeriveFunctor       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module IntegratedShrinking where
 
-import Control.Monad hiding (join)
-import Data.Maybe (mapMaybe, fromJust, listToMaybe)
-import Data.List (sort)
-import GHC.Stack
+import           Control.Monad hiding (join)
+import           Data.List     (intercalate, sort)
+import           Data.Maybe    (fromJust, listToMaybe, mapMaybe)
+import           GHC.Stack
 import qualified System.Random as R
 
 {-------------------------------------------------------------------------------
@@ -20,11 +22,29 @@ pickOne [x]    = [([], x, [])]
 pickOne (x:xs) = ([], x, xs)
                : map (\(as, b, cs) -> (x:as, b, cs)) (pickOne xs)
 
-repeatUntil :: forall m a. Monad m => m a -> (a -> Bool) -> m a
-repeatUntil ma p = search
+repeatUntil :: forall m a. Monad m => (a -> Bool) -> m a -> m a
+repeatUntil p ma = search
   where
     search :: m a
     search = ma >>= \a -> if p a then return a else search
+
+data Marked a = Marked { marked :: a , isFirst :: Bool , isLast :: Bool }
+  deriving (Show)
+
+mark :: [a] -> [Marked a]
+mark = \case
+    []     -> []
+    [x]    -> [Marked x True True]
+    (x:xs) -> Marked x True False : go xs
+  where
+    go :: [a] -> [Marked a]
+    go []     = error "mark: empty list"
+    go [x]    = [Marked x False True]
+    go (x:xs) = Marked x False False : go xs
+
+replicateA :: Applicative f => Word -> f a -> f [a]
+replicateA 0 _ = pure []
+replicateA n f = (:) <$> f <*> replicateA (n - 1) f
 
 {-------------------------------------------------------------------------------
   Manual shrinking
@@ -33,8 +53,11 @@ repeatUntil ma p = search
   infinite structures.
 -------------------------------------------------------------------------------}
 
-newtype Gen a = Gen { runGen :: R.StdGen -> a }
+newtype Gen a = Gen (R.StdGen -> a)
   deriving (Functor)
+
+runGen :: R.StdGen -> Gen a -> a
+runGen prng (Gen g) = g prng
 
 instance Applicative Gen where
   pure  = return
@@ -42,9 +65,9 @@ instance Applicative Gen where
 
 instance Monad Gen where
   return x = Gen $ \_prng -> x
-  Gen x >>= f = Gen $ \prng ->
+  x >>= f  = Gen $ \ prng ->
     let (prngX, prngF) = R.split prng
-    in runGen (f (x prngX)) prngF
+    in runGen prngF (f (runGen prngX x))
 
 data Manual a = Manual {
       gen    :: Gen a
@@ -55,16 +78,25 @@ data Manual a = Manual {
   Examples of 'Manual' instances
 -------------------------------------------------------------------------------}
 
--- | Generate random value in specified range
+-- | Generate random 'Bool', shrinking 'True' to 'False'
+mBool :: Manual Bool
+mBool = Manual {
+      gen    = Gen (fst . R.random)
+    , shrink = \b -> case b of
+                       True  -> [False]
+                       False -> []
+    }
+
+-- | Generate random value in the closed interval from @0@ to @hi@.
 --
 -- Shrinks using binary search to lower bound.
---
--- TODO: use nub.
-mRandomR :: (R.Random a, Integral a) => (a, a) -> Manual a
-mRandomR (lo, hi) = Manual {
-      gen    = Gen (fst . R.randomR (lo, hi))
-    , shrink = \x -> filter (\x' -> lo <= x' && x' < x)
-                            [lo + x `div` 2, x - 1]
+mWord :: Word -> Manual Word
+mWord hi = Manual {
+      gen    = Gen (fst . R.randomR (0, hi))
+    , shrink = \x -> concat [
+                         [ x `div` 2 | x > 2 ]
+                       , [ x - 1     | x > 0 ]
+                       ]
     }
 
 -- | Generate a pair of values
@@ -77,20 +109,16 @@ mPair genA genB = Manual {
       gen    = (,) <$> gen genA <*> gen genB
     , shrink = \(x, y) -> concat [
                    -- Shrink the left element
-                   [ (x', y)
-                   | x' <- shrink genA x
-                   ]
+                   [ (x', y) | x' <- shrink genA x ]
                    -- Shrink the right element
-                 , [ (x, y')
-                   | y' <- shrink genB y
-                   ]
+                 , [ (x, y') | y' <- shrink genB y ]
                  ]
     }
 
-mList :: Manual Int -> Manual a -> Manual [a]
+mList :: Manual Word -> Manual a -> Manual [a]
 mList genLen genA = Manual {
       gen    = do n <- gen genLen
-                  replicateM n (gen genA)
+                  replicateM (fromIntegral n) (gen genA)
     , shrink = \xs -> concat [
                    -- Drop an element
                    [ as ++ cs
@@ -109,7 +137,7 @@ mList genLen genA = Manual {
 -- May loop indefinitely.
 mSuchThat :: forall a. Manual a -> (a -> Bool) -> Manual a
 mSuchThat genA p = Manual {
-      gen    = gen genA `repeatUntil` p
+      gen    = repeatUntil p $ gen genA
     , shrink = shrink'
     }
   where
@@ -125,24 +153,24 @@ mSuchThat genA p = Manual {
 -- but may result in poorer shrinks.
 mSuchThat_ :: forall a. Manual a -> (a -> Bool) -> Manual a
 mSuchThat_ genA p = Manual {
-      gen    = gen genA `repeatUntil` p
+      gen    = repeatUntil p $ gen genA
     , shrink = filter p . shrink genA
     }
 
--- | Generate even number in the specified range
+-- | Generate even number in range from @0@ to @hi@.
 --
 -- We use 'mSuchThat' rather than 'mSuchThat_' because the latter would result
 -- in poor shrinks:
 --
--- > shrink (mRandomR (0, 10)                  ) 10 == [5, 9]
--- > shrink (mRandomR (0, 10) `mSuchThat`  even) 10 == [2,4,4,8]
--- > shrink (mRandomR (0, 10) `mSuchThat_` even) 10 == []
-mEven :: (Int, Int) -> Manual Int
-mEven (lo, hi) = mRandomR (lo, hi) `mSuchThat` even
+-- > shrink (mWord 10                  ) 10 == [5, 9]
+-- > shrink (mWord 10 `mSuchThat`  even) 10 == [2,4,4,8]
+-- > shrink (mWord 10 `mSuchThat_` even) 10 == []
+mEven :: Word -> Manual Word
+mEven hi = mWord hi `mSuchThat` even
 
 -- | Wrong version of 'mEven'
-mEvenWRONG :: (Int, Int) -> Manual Int
-mEvenWRONG (lo, hi) = mRandomR (lo, hi) `mSuchThat_` even
+mEvenWRONG :: Word -> Manual Word
+mEvenWRONG hi = mWord hi `mSuchThat_` even
 
 -- | Alternative definition of 'mEven'
 --
@@ -153,14 +181,14 @@ mEvenWRONG (lo, hi) = mRandomR (lo, hi) `mSuchThat_` even
 -- However, note that the logic for " evenness " now lives in both the generator
 -- and in the shrinker, and we cannot really re-use any existing code.
 -- Integrated shrinking has a better story here.
-mEven' :: (Int, Int) -> Manual Int
-mEven' (lo, hi) = Manual {
-      gen    = (*2) <$> gen (mRandomR (lo, hi `div` 2))
-    , shrink = \x -> filter (\x' -> even x' && lo <= x' && x' < x)
-                            [ lo + x `div` 2 - 1
-                            , lo + x `div` 2
-                            , x - 2
-                            ]
+mEven' :: Word -> Manual Word
+mEven' hi = Manual {
+      gen    = (*2) <$> gen (mWord (hi `div` 2))
+    , shrink = \x -> concat [
+                         [ x `div` 2     | even (x `div` 2) ]
+                       , [ x `div` 2 - 1 | odd  (x `div` 2) ]
+                       , [ x - 2         | x > 1            ]
+                       ]
     }
 
 {-------------------------------------------------------------------------------
@@ -168,7 +196,7 @@ mEven' (lo, hi) = Manual {
 -------------------------------------------------------------------------------}
 
 data Tree a = Node { root :: a , subtrees :: [Tree a] }
-  deriving (Functor)
+  deriving (Functor, Show)
 
 singleton :: a -> Tree a
 singleton x = Node x []
@@ -249,7 +277,7 @@ interleave' l@(Node f ls) r@(Node x rs) =
 -------------------------------------------------------------------------------}
 
 join :: Tree (Tree a) -> Tree a
-join (Node (Node x xs) xss) = Node x (xs ++ map join xss)
+join (Node (Node x xs) xss) = Node x (map join xss ++ xs)
 
 {-------------------------------------------------------------------------------
   Also as for 'Applicative', however, we can change the ordering of the
@@ -257,13 +285,30 @@ join (Node (Node x xs) xss) = Node x (xs ++ map join xss)
 
   (This also means 'Tree' has (at least) /four/ 'Applicative' instances.)
 
-  TODO: Explain why join' is better. And use it.
-  (Give examples of the effects of a greedy shrinker with both applicative
-  and monad to illustrate the differnces).
+  However, 'join'' is strictly worse: 'join' already introduces a strict
+  ordering between left and right, never going back to left if it can shrink
+  right; 'join'' tries to shrink the right /first/.
 -------------------------------------------------------------------------------}
 
 join' :: Tree (Tree a) -> Tree a
-join' (Node (Node x xs) xss) = Node x (map join' xss ++ xs)
+join' (Node (Node x xs) xss) = Node x (xs ++ map join' xss)
+
+{-------------------------------------------------------------------------------
+  To aid debugging: tree rendering
+-------------------------------------------------------------------------------}
+
+renderTree :: Tree String -> String
+renderTree = intercalate "\n" . go
+  where
+    go :: Tree String -> [String]
+    go (Node x xs) = x : concatMap inset (mark (map go xs))
+
+    inset :: Marked [String] -> [String]
+    inset Marked{..} =
+        case (isLast, marked) of
+          (_,     []  ) -> error "inset: empty list"
+          (True,  s:ss) -> ("└─ " ++ s) : map ("   " ++) ss
+          (False, s:ss) -> ("├─ " ++ s) : map ("│  " ++) ss
 
 {-------------------------------------------------------------------------------
   Integrated shrinking
@@ -272,8 +317,8 @@ join' (Node (Node x xs) xss) = Node x (map join' xss ++ xs)
 newtype Integrated a = Integrated (R.StdGen -> Tree a)
   deriving (Functor)
 
-withPRNG :: R.StdGen -> Integrated a -> Tree a
-withPRNG prng (Integrated f) = f prng
+runIntegrated :: R.StdGen -> Integrated a -> Tree a
+runIntegrated prng (Integrated f) = f prng
 
 instance Applicative Integrated where
   pure x = Integrated $ \_prng -> singleton x
@@ -281,35 +326,49 @@ instance Applicative Integrated where
     let (prngF, prngX) = R.split prng
     in interleave (f prngF) (x prngX)
 
-newtype Dependent a = Dependent { independent :: Integrated a }
+{-------------------------------------------------------------------------------
+  Monad interface for those who insist on it
+-------------------------------------------------------------------------------}
+
+newtype Dependent a = Dependent (R.StdGen -> Tree a)
   deriving (Functor)
 
+runDependent :: R.StdGen -> Dependent a -> Tree a
+runDependent prng (Dependent f) = f prng
+
 lift :: Integrated a -> Dependent a
-lift = Dependent
+lift (Integrated f) = Dependent f
+
+unsafeDependent :: Dependent a -> Integrated a
+unsafeDependent (Dependent f) = Integrated f
 
 instance Applicative Dependent where
   pure  = return
   (<*>) = ap
 
 instance Monad Dependent where
-  return x = Dependent . Integrated $ \_prng -> singleton x
-  Dependent (Integrated x) >>= f = Dependent . Integrated $ \prng ->
+  return x = Dependent $ \_prng -> singleton x
+  Dependent x >>= f = Dependent $ \prng ->
     let (prngX, prngF) = R.split prng
-    in join $ fmap (withPRNG prngF . independent . f) (x prngX)
+    in join $ fmap (runDependent prngF . f) (x prngX)
 
 {-------------------------------------------------------------------------------
   From 'Manual' to 'Integrated'
 -------------------------------------------------------------------------------}
 
 integrated :: Manual a -> Integrated a
-integrated Manual{..} = Integrated $ unfoldTree shrink . runGen gen
+integrated Manual{..} = Integrated $ \prng ->
+    unfoldTree shrink $ runGen prng gen
 
 {-------------------------------------------------------------------------------
   This is useful to define "primitive" integrated shrinkers
 -------------------------------------------------------------------------------}
 
-iRandomR :: (R.Random a, Integral a) => (a, a) -> Integrated a
-iRandomR = integrated . mRandomR
+iBool :: Integrated Bool
+iBool = integrated $ mBool
+
+iWord :: Word -> Integrated Word
+iWord = integrated . mWord
 
 {-------------------------------------------------------------------------------
   As long as we just need 'Applicative', defining composite integrated
@@ -320,10 +379,12 @@ iRandomR = integrated . mRandomR
 iPair :: Integrated a -> Integrated b -> Integrated (a, b)
 iPair genA genB = (,) <$> genA <*> genB
 
+iTriple :: Integrated a -> Integrated b -> Integrated c -> Integrated (a, b, c)
+iTriple genA genB genC = (,,) <$> genA <*> genB <*> genC
+
 -- | Generate list of fixed size
-iListOfSize :: Int -> Integrated a -> Integrated [a]
-iListOfSize 0 _    = pure []
-iListOfSize n genA = (:) <$> genA <*> iListOfSize (n - 1) genA
+iListOfSize :: Word -> Integrated a -> Integrated [a]
+iListOfSize = replicateA
 
 {-------------------------------------------------------------------------------
   We make the monad interface unavailable by default, to avoid unfortunate
@@ -336,10 +397,7 @@ iListOfSize n genA = (:) <$> genA <*> iListOfSize (n - 1) genA
 -- introduces an unwanted ordering between the two elements. This is why we
 -- do not make the monad interface available by default.
 iPairWRONG :: Integrated a -> Integrated b -> Integrated (a, b)
-iPairWRONG genA genB = independent $ do
-    a <- lift genA
-    b <- lift genB
-    return (a, b)
+iPairWRONG genA genB = unsafeDependent $ ((,) <$> lift genA) `ap` lift genB
 
 {-------------------------------------------------------------------------------
   Example: generating lists of random length
@@ -358,10 +416,10 @@ iPairWRONG genA genB = independent $ do
 -- elements themselves.
 --
 -- The absence of the 'Monad' instance helps avoid such definitions.
-iListWRONG :: Integrated Int -> Integrated a -> Integrated [a]
-iListWRONG genLen genA = independent $ do
+iListWRONG :: Integrated Word -> Integrated a -> Integrated [a]
+iListWRONG genLen genA = unsafeDependent $ do
     n <- lift genLen
-    replicateM n (lift genA)
+    replicateM (fromIntegral n) (lift genA)
 
 -- | Another invalid generator for lists
 --
@@ -370,127 +428,130 @@ iListWRONG genLen genA = independent $ do
 -- the length of the list and the elements.
 --
 -- As before, the absence of the 'Monad' instance helps avoid this definition.
-iListWRONG' :: Integrated Int -> Integrated a -> Integrated [a]
-iListWRONG' genLen genA = independent $ do
+iListWRONG' :: Integrated Word -> Integrated a -> Integrated [a]
+iListWRONG' genLen genA = unsafeDependent $ do
     n <- lift genLen
     lift $ iListOfSize n genA
-
-{-
-iList' genLen genA = ..
-    n <- genLen
-    includes <- replicateM n (generate true of false)
-  -}
 
 -- | Make the shrink tree explicitly available
 --
 -- This is very useful when we need to override shrinking.
 --
 -- See 'iList' for an example.
-freeze :: Integrated a -> Dependent (Tree a)
-freeze (Integrated f) = Dependent $ Integrated $ singleton . f
+freeze :: Integrated a -> Gen (Tree a)
+freeze (Integrated f) = Gen f
 
 -- | Just keep the root of the shrink tree
-dontShrink :: Integrated a -> Dependent a
-dontShrink (Integrated f) = Dependent $ Integrated $ singleton . root . f
+dontShrink :: Integrated a -> Gen a
+dontShrink (Integrated f) = Gen $ root . f
 
--- | Helper function for working with dependent generators
---
--- Note that while passing 'sequenceA' for the first argument is type correct,
--- it probably does not have the desired effect: it will shrink the elements of
--- @f@, but it will not shrink the structure of @f@ itself.
---
--- See 'iList' for an example.
---
--- TODO: Use Gen instead of INtegrated to avoid error case?
-dependent :: HasCallStack => (a -> Tree b) -> Dependent a -> Integrated b
-dependent manualShrinker (Dependent (Integrated f)) = Integrated $ \prng ->
-    case f prng of
-      Node xs [] -> manualShrinker xs
-      _otherwise -> error "dependent: invalid"
+-- | Turn generator with explicit shrinking back into an integrated shrinker
+dependent  :: HasCallStack => Gen (Tree a) -> Integrated a
+dependent (Gen f) = Integrated f
+
+-- | Auxiliary to 'iList'
+iListAux :: Integrated Word -> Integrated a -> Gen [Tree a]
+iListAux genLen genA = do
+    n <- dontShrink genLen
+    replicateM (fromIntegral n) (freeze genA)
+
+interleaveList :: [Tree a] -> Tree [a]
+interleaveList ts =
+    Node (map root ts) $ concat [
+        -- Drop one of the elements altogether
+        [ interleaveList (as ++ cs)
+        | (as, _b, cs) <- pickOne ts
+        ]
+        -- Shrink one of the elements
+      , [ interleaveList (as ++ [b'] ++ cs)
+        | (as, b, cs)  <- pickOne ts
+        , b'           <- subtrees b
+        ]
+      ]
 
 -- | Generate list of elements
 --
 -- Note the use of 'dontShrink': this establishes the invariant that
 -- 'dependent' relies on.
-iList :: Integrated Int -> Integrated a -> Integrated [a]
-iList genLen genA = dependent interleaveList $ do
-    n <- dontShrink genLen
-    replicateM n (freeze genA)
-  where
-    interleaveList :: [Tree a] -> Tree [a]
-    interleaveList ts =
-        Node (map root ts) $ concat [
-            -- Drop one of the elements altogether
-            [ interleaveList (as ++ cs)
-            | (as, _b, cs) <- pickOne ts
-            ]
-            -- Shrink one of the elements
-          , [ interleaveList (as ++ [b'] ++ cs)
-            | (as, b, cs)  <- pickOne ts
-            , b'           <- subtrees b
-            ]
-          ]
+iList :: Integrated Word -> Integrated a -> Integrated [a]
+iList genLen genA =
+    dependent $
+      interleaveList <$> iListAux genLen genA
 
 {-------------------------------------------------------------------------------
   Example: counting
 -------------------------------------------------------------------------------}
 
-data Couple a = One a | Two a a
+data Count a = Zero | One a | Two a a
   deriving (Show)
 
-couple :: [a] -> Couple a
-couple []         = error "couple: too few element"
-couple [a]        = One a
-couple [a, b]     = Two a b
-couple _otherwise = error "couple: too many elements"
+countList :: [a] -> Count a
+countList []         = Zero
+countList [a]        = One a
+countList [a, b]     = Two a b
+countList _otherwise = error "couple: too many elements"
+
+-- | Auxiliary to 'iGenCount'
+iGenCountAux :: Integrated a -> Gen (Count (Tree a))
+iGenCountAux genA = do
+    n <- dontShrink (iWord 2)
+    countList <$> replicateM (fromIntegral n) (freeze genA)
+
+interleaveCount :: Count (Tree a) -> Tree (Count a)
+interleaveCount Zero =
+    Node Zero []
+interleaveCount (One a)   =
+    Node (One (root a)) $ concat [
+        -- Drop the element
+        [ interleaveCount Zero ]
+        -- Shrink an element
+      , [ interleaveCount (One a') | a' <- subtrees a ]
+      ]
+interleaveCount (Two a b) =
+    Node (Two (root a) (root b)) $ concat [
+        -- Drop an element
+        [ interleaveCount (One a) ]
+      , [ interleaveCount (One b) ]
+        -- Shrink an element
+      , [ interleaveCount (Two a' b ) | a' <- subtrees a ]
+      , [ interleaveCount (Two a  b') | b' <- subtrees b ]
+      ]
 
 -- | Generator for 'Count' in the same style as we did for lists
 --
 -- This demonstrates that the pattern scales to other datatypes.
-iGenCouple :: forall a. Integrated a -> Integrated (Couple a)
-iGenCouple genA = dependent interleaveCount $ do
-    n <- dontShrink (iRandomR (1, 2))
-    couple <$> replicateM n (freeze genA)
-  where
-    interleaveCount :: Couple (Tree a) -> Tree (Couple a)
-    interleaveCount (One a)   = One <$> a
-    interleaveCount (Two a b) =
-        Node (Two (root a) (root b)) $ concat [
-            -- Drop an element
-            [ interleaveCount (One a) ]
-          , [ interleaveCount (One b) ]
-            -- Shrink an element
-          , [ interleaveCount (Two a' b ) | a' <- subtrees a ]
-          , [ interleaveCount (Two a  b') | b' <- subtrees b ]
-          ]
+iGenCount :: forall a. Integrated a -> Integrated (Count a)
+iGenCount genA =
+    dependent $
+      interleaveCount <$> iGenCountAux genA
 
--- | Variation on 'iGenCouple'
+-- | Variation on 'iGenCount'
 --
 -- Here we can really benefit from integrated shrinking: we just reuse the
--- one for lists: the 'Couple' will shrink as the list does.
-iGenCouple' :: Integrated a -> Integrated (Couple a)
-iGenCouple' = fmap couple . iList (iRandomR (1, 2))
+-- one for lists: the 'Count' will shrink as the list does.
+iGenCount' :: Integrated a -> Integrated (Count a)
+iGenCount' = fmap countList . iList (iWord 2)
 
--- | Pair a 'Couple' with the list that generated it
-data WrappedCouple a = WrappedCouple [a] (Couple a)
+-- | Pair a 'Count' with the list that generated it
+data WrapCount a = WrapCount [a] (Count a)
 
-wrappedCouple :: [a] -> WrappedCouple a
-wrappedCouple xs = WrappedCouple xs (couple xs)
+wrapCount :: [a] -> WrapCount a
+wrapCount xs = WrapCount xs (countList xs)
 
--- | Attempt to define the equivalent of 'iGenCouple'' using manual shrinking
+-- | Attempt to define the equivalent of 'iGenCount'' using manual shrinking
 --
 -- Note that this requires a wrapper type, and hence we lose compositionaly
--- (if we have other types that need 'Couple's as subterms, we cannot use
--- 'WrappedCouple'). An real-life example of this is QuickCheck's
+-- (if we have other types that need 'Count's as subterms, we cannot use
+-- 'WrapCount'). An real-life example of this is QuickCheck's
 -- 'Function' type.
-mGenCouple' :: forall a. Manual a -> Manual (WrappedCouple a)
-mGenCouple' genA = Manual {
-      gen    = wrappedCouple <$> gen genAs
-    , shrink = \(WrappedCouple xs _) -> map wrappedCouple (shrink genAs xs)
+mGenCount' :: forall a. Manual a -> Manual (WrapCount a)
+mGenCount' genA = Manual {
+      gen    = wrapCount <$> gen genAs
+    , shrink = \(WrapCount xs _) -> map wrapCount (shrink genAs xs)
     }
   where
     genAs :: Manual [a]
-    genAs = mList (mRandomR (1, 2)) genA
+    genAs = mList (mWord 2) genA
 
 {-------------------------------------------------------------------------------
   Example: filtering
@@ -505,55 +566,46 @@ mGenCouple' genA = Manual {
 -- we want. The absence of the 'Monad' instance for 'Integrated' helps avoid
 -- such mistakes.
 iSuchThatWRONG :: Integrated a -> (a -> Bool) -> Integrated a
-iSuchThatWRONG genA p = independent $ lift genA `repeatUntil` p
+iSuchThatWRONG genA p = unsafeDependent $ repeatUntil p $ lift genA
 
 -- | Filter out elements that do not satisfy the predicate
-iSuchThat :: Integrated a -> (a -> Bool) -> Integrated a
-iSuchThat genA p = dependent (filtered . filterTree p) $
-    freeze genA `repeatUntil` (p . root)
-  where
-    -- Top-level result /must/ be a single tree since we know that the
-    -- root of the tree must satisfy the predicate
-    filtered :: [Tree a] -> Tree a
-    filtered [x] = x
-    filtered _   = error "iSuchThat: impossible"
+iSuchThat :: forall a. Integrated a -> (a -> Bool) -> Integrated a
+iSuchThat genA p =
+    dependent $ fmap (head . filterTree p) $
+      repeatUntil (p . root) $ freeze genA
 
 -- | Faster version of 'iSuchThat'
 --
 -- This is a version of 'iSuchThat' that does not attempt to shrink a value that
 -- does not satisfy the predicate any further. It trades shrinking performance
 -- for the quality of the shrinks.
-iSuchThat_ :: Integrated a -> (a -> Bool) -> Integrated a
-iSuchThat_ genA p = dependent (fromJust . filterTree_ p) $
-    freeze genA `repeatUntil` (p . root)
+iSuchThat_ :: forall a. Integrated a -> (a -> Bool) -> Integrated a
+iSuchThat_ genA p =
+    dependent $ fmap (fromJust . filterTree_ p) $
+      repeatUntil (p . root) $ freeze genA
 
 {-------------------------------------------------------------------------------
   Example: even numbers
 -------------------------------------------------------------------------------}
 
--- | Produce an even number in the specified range
+-- | Produce an even number in range from @0@ to @hi@.
 --
 -- Note that the use of 'iSuchThat_' here would produce poor shrinks.
-iEven :: (Int, Int) -> Integrated Int
-iEven (lo, hi) = iRandomR (lo, hi) `iSuchThat` even
+iEven :: Word -> Integrated Word
+iEven hi = iWord hi `iSuchThat` even
 
 -- | Variation on 'iEven' using the wrong filter
-iEvenWRONG :: (Int, Int) -> Integrated Int
-iEvenWRONG (lo, hi) = iRandomR (lo, hi) `iSuchThat_` even
+iEvenWRONG :: Word -> Integrated Word
+iEvenWRONG hi = iWord hi `iSuchThat_` even
 
 -- | Alternative definition of 'iEven'
 --
 -- This is a nice example where we can really benefit from integrated shrinking.
---
--- TODO: Bugfix, lower bound needs to div 2.
--- (Or workaround, upper bound only, lower bound always zero)
-iEven' :: (Int, Int) -> Integrated Int
-iEven' (lo, hi) = (*2) <$> iRandomR (lo, hi `div` 2)
+iEven' :: Word -> Integrated Word
+iEven' hi = (*2) <$> iWord (hi `div` 2)
 
 {-------------------------------------------------------------------------------
   Driver
-
-  TODO: Discuss tests with multiple generators.
 -------------------------------------------------------------------------------}
 
 type Seed = Int
@@ -567,37 +619,39 @@ checkIntegrated genA p = do
 checkIntegratedWith :: forall a. Show a
                     => Seed -> Integrated a -> (a -> Bool) -> IO ()
 checkIntegratedWith seed genA p = do
-    case findCounterexample p (root (withPRNG (R.mkStdGen seed) genAs)) of
+    case findCounterexample p (runGen (R.mkStdGen seed) genAs) of
       Nothing ->
         putStrLn $ "OK"
-      Just (a, shrunk) -> do
-        putStrLn $ "Failed: " ++ show a
-        putStrLn $ "Shrunk: " ++ show shrunk
+      Just shrinkSteps -> do
+        putStrLn $ "Failed: " ++ show (head shrinkSteps)
+        putStrLn $ "Shrinking: " ++ show shrinkSteps
+        putStrLn $ "Shrunk: " ++ show (last shrinkSteps)
   where
     numTests :: Int
     numTests = 100
 
-    genAs :: Integrated [Tree a]
-    genAs = independent $ replicateM numTests (freeze genA)
+    genAs :: Gen [Tree a]
+    genAs = replicateM numTests (freeze genA)
 
 -- | Find counter example to the specified property
 --
--- If a counter-example was found, returns the counter-example as well as its
--- shrunk form.
+-- If a counter-example was found, returns all shrink steps taken
+-- (first element of the list is the original counter example, last the
+-- minimal test case).
 --
 -- NOTE: This hardcodes another point where we stop early, rather than
 -- continue shrinking.
-findCounterexample :: forall a. (a -> Bool) -> [Tree a] -> Maybe (a, a)
+findCounterexample :: forall a. (a -> Bool) -> [Tree a] -> Maybe [a]
 findCounterexample p =
-      fmap (\x -> (root x, minimize x))
+      fmap minimize
     . listToMaybe
     . filter (not . p . root)
   where
-    minimize :: Tree a -> a
+    minimize :: Tree a -> [a]
     minimize (Node x xs) =
         case filter (not . p . root) xs of
-          []   -> x
-          x':_ -> minimize x'
+          []   -> [x]
+          x':_ -> x : minimize x'
 
 checkManual :: Show a => Manual a -> (a -> Bool) -> IO ()
 checkManual = checkIntegrated . integrated
@@ -610,11 +664,15 @@ checkManualWith seed = checkIntegratedWith seed . integrated
   Example top-level calls
 -------------------------------------------------------------------------------}
 
-mExampleInt :: Manual Int
-mExampleInt = mRandomR (0, 100)
+mExampleWord :: Manual Word
+mExampleWord = mWord 100
 
-iExampleInt :: Integrated Int
-iExampleInt = iRandomR (0, 100)
+iExampleWord :: Integrated Word
+iExampleWord = iWord 100
+
+-- | All numbers are less than 12.
+mExampleTwelve :: IO ()
+mExampleTwelve = checkManual mExampleWord (< 12)
 
 -- | All numbers are even
 --
@@ -622,50 +680,116 @@ iExampleInt = iRandomR (0, 100)
 -- 'findCounterexample' stops as soon as shrinking yields only values that
 -- are not counter-examples anymore.
 mExampleEven :: IO ()
-mExampleEven = checkManual mExampleInt even
+mExampleEven = checkManual mExampleWord even
 
 -- | All even numbers are less than 5
 --
 -- Note how 'mExampleEven5''' does not shrink properly.
 mExampleEven5, mExampleEven5', mExampleEven5'' :: IO ()
-mExampleEven5   = checkManual (mEven      (0, 100)) (< 5)
-mExampleEven5'  = checkManual (mEven'     (0, 100)) (< 5)
-mExampleEven5'' = checkManual (mEvenWRONG (0, 100)) (< 5)
+mExampleEven5   = checkManual (mEven      100) (< 5)
+mExampleEven5'  = checkManual (mEven'     100) (< 5)
+mExampleEven5'' = checkManual (mEvenWRONG 100) (< 5)
 
 -- | All even numbers are less than 5
 --
 -- As above, 'iExampleEven5''' shrinks poorly.
 iExampleEven5, iExampleEven5', iExampleEven5'' :: IO ()
-iExampleEven5   = checkIntegrated (iEven      (0, 100)) (< 5)
-iExampleEven5'  = checkIntegrated (iEven'     (0, 100)) (< 5)
-iExampleEven5'' = checkIntegrated (iEvenWRONG (0, 100)) (< 5)
+iExampleEven5   = checkIntegrated (iEven      100) (< 5)
+iExampleEven5'  = checkIntegrated (iEven'     100) (< 5)
+iExampleEven5'' = checkIntegrated (iEvenWRONG 100) (< 5)
 
 -- | First element is always less than the second element of a pair
-iExampleLess, iExampleLess' :: IO ()
+mExampleLess, iExampleLess, iExampleLess' :: IO ()
+mExampleLess  = checkManual
+                  (mPair mExampleWord mExampleWord)
+                  (uncurry (<))
 iExampleLess  = checkIntegrated
-                  (iPair iExampleInt iExampleInt)
+                  (iPair iExampleWord iExampleWord)
                   (uncurry (<))
 iExampleLess' = checkIntegrated
-                  (iPairWRONG iExampleInt iExampleInt)
+                  (iPairWRONG iExampleWord iExampleWord)
                   (uncurry (<))
 
+-- | All pairs contain two different values
+mExampleEqual :: IO ()
+mExampleEqual = checkManual
+                  (mPair mExampleWord mExampleWord)
+                  (uncurry (/=))
+
 -- | All lists are sorted
-iExampleSorted, iExampleSorted', iExampleSorted'' :: IO ()
+mExampleSorted, iExampleSorted, iExampleSorted', iExampleSorted'' :: IO ()
+mExampleSorted   = checkManual
+                     (mList (mWord 3) mExampleWord)
+                     (\xs -> xs == sort xs)
 iExampleSorted   = checkIntegrated
-                     (iList (iRandomR (0, 3)) iExampleInt)
+                     (iList (iWord 3) iExampleWord)
                      (\xs -> xs == sort xs)
 iExampleSorted'  = checkIntegrated
-                     (iListWRONG (iRandomR (0, 3)) iExampleInt)
+                     (iListWRONG (iWord 3) iExampleWord)
                      (\xs -> xs == sort xs)
 iExampleSorted'' = checkIntegrated
-                     (iListWRONG' (iRandomR (0, 3)) iExampleInt)
+                     (iListWRONG' (iWord 3) iExampleWord)
                      (\xs -> xs == sort xs)
 
-coupleOrdered :: Ord a => Couple a -> Bool
+coupleOrdered :: Ord a => Count a -> Bool
+coupleOrdered Zero      = True
 coupleOrdered (One _)   = True
 coupleOrdered (Two a b) = a <= b
 
 -- | A couple of elements is always ordered
 iExampleOrdered, iExampleOrdered' :: IO ()
-iExampleOrdered  = checkIntegrated (iGenCouple  iExampleInt) coupleOrdered
-iExampleOrdered' = checkIntegrated (iGenCouple' iExampleInt) coupleOrdered
+iExampleOrdered  = checkIntegrated (iGenCount  iExampleWord) coupleOrdered
+iExampleOrdered' = checkIntegrated (iGenCount' iExampleWord) coupleOrdered
+
+-- | Just to demonstrate greediness
+--
+-- 'iExampleGreedyM' shinks correctly when using 'join'' but not with 'join'
+iExampleGreedyA, iExampleGreedyM :: IO ()
+iExampleGreedyA = checkIntegrated (iPair      iExampleWord iExampleWord) (\(x, y) -> x + y == 0)
+iExampleGreedyM = checkIntegrated (iPairWRONG iExampleWord iExampleWord) (\(x, y) -> x + y == 0)
+
+mExampleSumLength, mExampleGreaterLen :: IO ()
+mExampleSumLength  = checkManual
+                       (mList (mWord 3) mExampleWord)
+                       (\xs -> sum xs <= fromIntegral (length xs))
+mExampleGreaterLen = checkManual
+                       (mList (mWord 3) mExampleWord)
+                       (\xs -> all (\x -> x >= fromIntegral (length xs)) xs)
+
+{-------------------------------------------------------------------------------
+  Mostly to aid writing the blog post
+-------------------------------------------------------------------------------}
+
+-- | Variation on 'checkIntegrated' that doesn't just look for /any/
+-- counter-example, but one that satisfies a predicate. Useful when looking for
+-- small examples.
+findIntegrated :: forall a. Show a
+               => Integrated a -> (a -> Bool) -> ([a] -> Bool) -> IO ()
+findIntegrated genA p p' = go
+  where
+    go :: IO ()
+    go = do
+        seed <- R.randomIO
+        case findCounterexample p (runGen (R.mkStdGen seed) genAs) of
+          Just shrinkSteps | p' shrinkSteps -> do
+            putStrLn $ "Using seed " ++ show seed
+            putStrLn $ "Shrinking: " ++ show shrinkSteps
+          _otherwise -> go
+
+    numTests :: Int
+    numTests = 100
+
+    genAs :: Gen [Tree a]
+    genAs = replicateM numTests (freeze genA)
+
+-- | Analogue of 'findIntegrated' for manual shrinkers.
+findManual :: Show a => Manual a -> (a -> Bool) -> ([a] -> Bool) -> IO ()
+findManual = findIntegrated . integrated
+
+-- | Show random tree that satisfies the given property
+showTree :: forall a. Show a => Integrated a -> (Tree a -> Bool) -> IO ()
+showTree g p =
+    find >>= putStrLn . renderTree . fmap show
+  where
+    find :: IO (Tree a)
+    find = repeatUntil p $ (\s -> runIntegrated (R.mkStdGen s) g) <$> R.randomIO
