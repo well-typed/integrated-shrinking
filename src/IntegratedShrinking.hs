@@ -434,22 +434,19 @@ iListWRONG' genLen genA = unsafeIndependent $ do
 -- This is very useful when we need to override shrinking.
 --
 -- See 'iList' for an example.
-freeze :: Integrated a -> Dependent (Tree a)
-freeze (Integrated f) = Dependent $ singleton . f
+freeze :: Integrated a -> Gen (Tree a)
+freeze (Integrated f) = Gen f
 
 -- | Just keep the root of the shrink tree
-dontShrink :: Integrated a -> Dependent a
-dontShrink (Integrated f) = Dependent $ singleton . root . f
+dontShrink :: Integrated a -> Gen a
+dontShrink (Integrated f) = Gen $ root . f
 
 -- | Turn generator with explicit shrinking back into an integrated shrinker
-dependent  :: HasCallStack => Dependent (Tree a) -> Integrated a
-dependent (Dependent f) = Integrated $ \prng ->
-    case f prng of
-      Node a []  -> a
-      _otherwise -> error "dependent: unexpected subtrees"
+dependent  :: HasCallStack => Gen (Tree a) -> Integrated a
+dependent (Gen f) = Integrated f
 
 -- | Auxiliary to 'iList'
-iListAux :: Integrated Word -> Integrated a -> Dependent [Tree a]
+iListAux :: Integrated Word -> Integrated a -> Gen [Tree a]
 iListAux genLen genA = do
     n <- dontShrink genLen
     replicateM (fromIntegral n) (freeze genA)
@@ -489,7 +486,7 @@ couple [a, b]     = Two a b
 couple _otherwise = error "couple: too many elements"
 
 -- | Auxiliary to 'iGenCouple'
-iGenCoupleAux :: Integrated a -> Dependent (Count (Tree a))
+iGenCoupleAux :: Integrated a -> Gen (Count (Tree a))
 iGenCoupleAux genA = do
     n <- dontShrink (iWord 2)
     couple <$> replicateM (fromIntegral n) (freeze genA)
@@ -552,6 +549,7 @@ mGenCouple' genA = Manual {
   Example: filtering
 -------------------------------------------------------------------------------}
 
+{-
 -- | Invalid definition of filtering
 --
 -- Note what would happen here: the check if the element satisfies the
@@ -562,6 +560,7 @@ mGenCouple' genA = Manual {
 -- such mistakes.
 iSuchThatWRONG :: Integrated a -> (a -> Bool) -> Integrated a
 iSuchThatWRONG genA p = unsafeIndependent $ repeatUntil p $ lift genA
+-}
 
 -- | Filter out elements that do not satisfy the predicate
 iSuchThat :: forall a. Integrated a -> (a -> Bool) -> Integrated a
@@ -624,7 +623,7 @@ checkIntegrated genA p = do
 checkIntegratedWith :: forall a. Show a
                     => Seed -> Integrated a -> (a -> Bool) -> IO ()
 checkIntegratedWith seed genA p = do
-    case findCounterexample p (root (runIntegrated (R.mkStdGen seed) genAs)) of
+    case findCounterexample p (runGen (R.mkStdGen seed) genAs) of
       Nothing ->
         putStrLn $ "OK"
       Just shrinkSteps -> do
@@ -635,8 +634,8 @@ checkIntegratedWith seed genA p = do
     numTests :: Int
     numTests = 100
 
-    genAs :: Integrated [Tree a]
-    genAs = unsafeIndependent $ replicateM numTests (freeze genA)
+    genAs :: Gen [Tree a]
+    genAs = replicateM numTests (freeze genA)
 
 -- | Find counter example to the specified property
 --
@@ -646,6 +645,8 @@ checkIntegratedWith seed genA p = do
 --
 -- NOTE: This hardcodes another point where we stop early, rather than
 -- continue shrinking.
+--
+-- NOTE: returns non-empty list
 findCounterexample :: forall a. (a -> Bool) -> [Tree a] -> Maybe [a]
 findCounterexample p =
       fmap minimize
@@ -765,6 +766,7 @@ mExampleGreaterLen = checkManual
   Mostly to aid writing the blog post
 -------------------------------------------------------------------------------}
 
+{-
 -- | Variation on 'checkIntegrated' that doesn't just look for /any/
 -- counter-example, but one that satisfies a predicate. Useful when looking for
 -- small examples.
@@ -798,3 +800,4 @@ showTree g p =
   where
     find :: IO (Tree a)
     find = repeatUntil p $ (\s -> runIntegrated (R.mkStdGen s) g) <$> R.randomIO
+-}
