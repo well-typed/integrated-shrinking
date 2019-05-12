@@ -78,14 +78,22 @@ data Manual a = Manual {
   Examples of 'Manual' instances
 -------------------------------------------------------------------------------}
 
+shrinkBool :: Bool -> [Bool]
+shrinkBool True  = [False]
+shrinkBool False = []
+
 -- | Generate random 'Bool', shrinking 'True' to 'False'
 mBool :: Manual Bool
 mBool = Manual {
       gen    = Gen (fst . R.random)
-    , shrink = \b -> case b of
-                       True  -> [False]
-                       False -> []
+    , shrink = shrinkBool
     }
+
+shrinkWord :: Word -> [Word]
+shrinkWord x = concat [
+      [ x `div` 2 | x > 2 ]
+    , [ x - 1     | x > 0 ]
+    ]
 
 -- | Generate random value in the closed interval from @0@ to @hi@.
 --
@@ -93,10 +101,7 @@ mBool = Manual {
 mWord :: Word -> Manual Word
 mWord hi = Manual {
       gen    = Gen (fst . R.randomR (0, hi))
-    , shrink = \x -> concat [
-                         [ x `div` 2 | x > 2 ]
-                       , [ x - 1     | x > 0 ]
-                       ]
+    , shrink = shrinkWord
     }
 
 -- | Generate a pair of values
@@ -115,21 +120,24 @@ mPair genA genB = Manual {
                  ]
     }
 
+shrinkList :: (a -> [a]) -> [a] -> [[a]]
+shrinkList shrinkA xs = concat [
+      -- Drop an element
+      [ as ++ cs
+      | (as, _b, cs) <- pickOne xs
+      ]
+      -- Shrink an element
+    , [ as ++ [b'] ++ cs
+      | (as, b, cs) <- pickOne xs
+      , b' <- shrinkA b
+      ]
+    ]
+
 mList :: Manual Word -> Manual a -> Manual [a]
 mList genLen genA = Manual {
       gen    = do n <- gen genLen
                   replicateM (fromIntegral n) (gen genA)
-    , shrink = \xs -> concat [
-                   -- Drop an element
-                   [ as ++ cs
-                   | (as, _b, cs) <- pickOne xs
-                   ]
-                   -- Shrink an element
-                 , [ as ++ [b'] ++ cs
-                   | (as, b, cs) <- pickOne xs
-                   , b' <- shrink genA b
-                   ]
-                 ]
+    , shrink = shrinkList (shrink genA)
     }
 
 -- | Filter out elements that don't satisfy the predicate
@@ -605,6 +613,46 @@ iEven' :: Word -> Integrated Word
 iEven' hi = (*2) <$> iWord (hi `div` 2)
 
 {-------------------------------------------------------------------------------
+  Generate lists in a different way
+-------------------------------------------------------------------------------}
+
+prune :: Integrated a -> Integrated a
+prune (Integrated f) = Integrated $ singleton . root . f
+
+-- | Construct a list given a list of booleans indicating whether an
+-- element should be included or not
+--
+-- It is important that we /run/ the generator independent of the boolean.
+-- Suppose that we didn't do this, and we started with @[True, True, True]@
+-- generating a list @[1, 2, 3]@. If we now shrink that list of booleans to
+-- @[False, True, True]@ we intend for the first element of the list to be
+-- skipped resulting in @[2, 3]@. However, if we skip the generator entirely,
+-- we simply shift which numbers we generate and we end up with the list @[1,2]@
+-- instead.
+iListSkip :: [Bool] -> Integrated a -> Integrated [a]
+iListSkip []     _    = pure []
+iListSkip (b:bs) genA = cons b <$> genA <*> iListSkip bs genA
+  where
+    cons :: Bool -> a -> [a] -> [a]
+    cons False _ xs = xs
+    cons True  x xs = x:xs
+
+-- | Another attempt at generating a list
+--
+-- Rather than generating a simple number, we generate a list of booleans.
+-- The shrinker for the list of booleans can then shrink so that we can drop
+-- /any/ element from the list, rather than just at the end. This is an
+-- improvement, but this still suffers from the problem that we /first/ shrink
+-- all the booleans and /then/ shrink the elements. This works just fine for
+-- the sorted property, but fails when we really must shrink an element before
+-- we can drop one (as in 'iExampleGreaterLen').
+iListWRONG'' :: Integrated Word -> Integrated a -> Integrated [a]
+iListWRONG'' genLen genA = unsafeDependent $ do
+    n  <- lift $ prune genLen -- important that this doesn't shrink
+    bs <- lift $ iListOfSize n iBool
+    lift $ iListSkip bs genA
+
+{-------------------------------------------------------------------------------
   Driver
 -------------------------------------------------------------------------------}
 
@@ -717,19 +765,22 @@ mExampleEqual = checkManual
                   (uncurry (/=))
 
 -- | All lists are sorted
-mExampleSorted, iExampleSorted, iExampleSorted', iExampleSorted'' :: IO ()
-mExampleSorted   = checkManual
-                     (mList (mWord 3) mExampleWord)
-                     (\xs -> xs == sort xs)
-iExampleSorted   = checkIntegrated
-                     (iList (iWord 3) iExampleWord)
-                     (\xs -> xs == sort xs)
-iExampleSorted'  = checkIntegrated
-                     (iListWRONG (iWord 3) iExampleWord)
-                     (\xs -> xs == sort xs)
-iExampleSorted'' = checkIntegrated
-                     (iListWRONG' (iWord 3) iExampleWord)
-                     (\xs -> xs == sort xs)
+mExampleSorted, iExampleSorted, iExampleSorted', iExampleSorted'', iExampleSorted''' :: IO ()
+mExampleSorted    = checkManual
+                      (mList (mWord 3) mExampleWord)
+                      (\xs -> xs == sort xs)
+iExampleSorted    = checkIntegrated
+                      (iList (iWord 3) iExampleWord)
+                      (\xs -> xs == sort xs)
+iExampleSorted'   = checkIntegrated
+                      (iListWRONG (iWord 3) iExampleWord)
+                      (\xs -> xs == sort xs)
+iExampleSorted''  = checkIntegrated
+                      (iListWRONG' (iWord 3) iExampleWord)
+                      (\xs -> xs == sort xs)
+iExampleSorted''' = checkIntegrated
+                      (iListWRONG'' (iWord 3) iExampleWord)
+                      (\xs -> xs == sort xs)
 
 coupleOrdered :: Ord a => Count a -> Bool
 coupleOrdered Zero      = True
@@ -748,12 +799,15 @@ iExampleGreedyA, iExampleGreedyM :: IO ()
 iExampleGreedyA = checkIntegrated (iPair      iExampleWord iExampleWord) (\(x, y) -> x + y == 0)
 iExampleGreedyM = checkIntegrated (iPairWRONG iExampleWord iExampleWord) (\(x, y) -> x + y == 0)
 
-mExampleSumLength, mExampleGreaterLen :: IO ()
+mExampleSumLength, mExampleGreaterLen, iExampleGreaterLen :: IO ()
 mExampleSumLength  = checkManual
                        (mList (mWord 3) mExampleWord)
                        (\xs -> sum xs <= fromIntegral (length xs))
 mExampleGreaterLen = checkManual
                        (mList (mWord 3) mExampleWord)
+                       (\xs -> all (\x -> x >= fromIntegral (length xs)) xs)
+iExampleGreaterLen = checkIntegrated
+                       (iListWRONG'' (iWord 3) iExampleWord)
                        (\xs -> all (\x -> x >= fromIntegral (length xs)) xs)
 
 {-------------------------------------------------------------------------------
@@ -772,12 +826,14 @@ findIntegrated genA p p' = go
         seed <- R.randomIO
         case findCounterexample p (runGen (R.mkStdGen seed) genAs) of
           Just shrinkSteps | p' shrinkSteps -> do
-            putStrLn $ "Using seed " ++ show seed
+            putStrLn $ "Using seed: " ++ show seed
+            putStrLn $ "Trees: " ++ unlines (map (renderTree . fmap show) (runGen (R.mkStdGen seed) genAs))
             putStrLn $ "Shrinking: " ++ show shrinkSteps
+
           _otherwise -> go
 
     numTests :: Int
-    numTests = 100
+    numTests = 1
 
     genAs :: Gen [Tree a]
     genAs = replicateM numTests (freeze genA)
